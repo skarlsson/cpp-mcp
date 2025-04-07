@@ -820,7 +820,7 @@ json stdio_client::send_jsonrpc(const request& req) {
     }
     
     // Wait for response, set timeout
-    const auto timeout = std::chrono::seconds(30);
+    const auto timeout = std::chrono::seconds(60);
     auto status = response_future.wait_for(timeout);
     
     if (status == std::future_status::ready) {

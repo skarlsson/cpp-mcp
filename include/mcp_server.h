@@ -33,6 +33,12 @@
 
 namespace mcp {
 
+using method_handler = std::function<json(const json&, const std::string&)>;
+using tool_handler = method_handler;
+using notification_handler = std::function<void(const json&, const std::string&)>;
+using auth_handler = std::function<bool(const std::string&, const std::string&)>;
+using session_cleanup_handler = std::function<void(const std::string&)>;
+
 class event_dispatcher {
 public:
     event_dispatcher() {
@@ -223,14 +229,14 @@ public:
      * @param method The method name
      * @param handler The function to call when the method is invoked
      */
-    void register_method(const std::string& method, std::function<json(const json&)> handler);
+    void register_method(const std::string& method, method_handler handler);
     
     /**
      * @brief Register a notification handler
      * @param method The notification method name
      * @param handler The function to call when the notification is received
      */
-    void register_notification(const std::string& method, std::function<void(const json&)> handler);
+    void register_notification(const std::string& method, notification_handler handler);
     
     /**
      * @brief Register a resource
@@ -245,6 +251,13 @@ public:
      * @param handler The function to call when the tool is invoked
      */
     void register_tool(const tool& tool, tool_handler handler);
+
+    /**
+     * @brief Register a session cleanup handler
+     * @param key Tool or resource name to be cleaned up
+     * @param handler The function to call when the session is closed
+     */
+    void register_session_cleanup(const std::string& key, session_cleanup_handler handler);
     
     /**
      * @brief Get the list of available tools
@@ -255,19 +268,26 @@ public:
     /**
      * @brief Set authentication handler
      * @param handler Function that takes a token and returns true if valid
+     * @note The handler should return true if the token is valid, otherwise false
+     * @note Not used in the current implementation
      */
-    void set_auth_handler(std::function<bool(const std::string&)> handler);
+    void set_auth_handler(auth_handler handler);
 
     /**
-     * @brief Send a request to a client
+     * @brief Send a request (or notification) to a client
      * @param session_id The session ID of the client
-     * @param method The method to call
-     * @param params The parameters to pass
-     * 
-     * This method will only send requests other than ping and logging
-     * after the client has sent the initialized notification.
+     * @param req The request to send
      */
-    void send_request(const std::string& session_id, const std::string& method, const json& params = json::object());
+    void send_request(const std::string& session_id, const request& req);
+
+    /**
+     * @brief Set mount point for server
+     * @param mount_point The mount point to set
+     * @param dir The directory to serve from the mount point
+     * @param headers Optional headers to include in the response
+     * @return True if the mount point was set successfully
+     */
+    bool set_mount_point(const std::string& mount_point, const std::string& dir, httplib::Headers headers = httplib::Headers());
 
 private:
     std::string host_;
@@ -296,10 +316,10 @@ private:
     std::string msg_endpoint_;
     
     // Method handlers
-    std::map<std::string, std::function<json(const json&)>> method_handlers_;
+    std::map<std::string, method_handler> method_handlers_;
     
     // Notification handlers
-    std::map<std::string, std::function<void(const json&)>> notification_handlers_;
+    std::map<std::string, notification_handler> notification_handlers_;
     
     // Resources map (path -> resource)
     std::map<std::string, std::shared_ptr<resource>> resources_;
@@ -308,7 +328,7 @@ private:
     std::map<std::string, std::pair<tool, tool_handler>> tools_;
     
     // Authentication handler
-    std::function<bool(const std::string&)> auth_handler_;
+    auth_handler auth_handler_;
     
     // Mutex for thread safety
     mutable std::mutex mutex_;
@@ -327,6 +347,9 @@ private:
     
     // Handle incoming JSON-RPC requests
     void handle_jsonrpc(const httplib::Request& req, httplib::Response& res);
+
+    // Send a JSON-RPC message to a client
+    void send_jsonrpc(const std::string& session_id, const json& message);
     
     // Process a JSON-RPC request
     json process_request(const request& req, const std::string& session_id);
@@ -345,10 +368,10 @@ private:
     
     // Auxiliary function to create an async handler from a regular handler
     template<typename F>
-    std::function<std::future<json>(const json&)> make_async_handler(F&& handler) {
-        return [handler = std::forward<F>(handler)](const json& params) -> std::future<json> {
-            return std::async(std::launch::async, [handler, params]() -> json {
-                return handler(params);
+    std::function<std::future<json>(const json&, const std::string&)> make_async_handler(F&& handler) {
+        return [handler = std::forward<F>(handler)](const json& params, const std::string& session_id) -> std::future<json> {
+            return std::async(std::launch::async, [handler, params, session_id]() -> json {
+                return handler(params, session_id);
             });
         };
     }
@@ -369,6 +392,12 @@ private:
     // Session management and maintenance
     void check_inactive_sessions();
     std::unique_ptr<std::thread> maintenance_thread_;
+
+    // Session cleanup handler
+    std::map<std::string, session_cleanup_handler> session_cleanup_handler_;
+
+    // Close session
+    void close_session(const std::string& session_id);
 };
 
 } // namespace mcp

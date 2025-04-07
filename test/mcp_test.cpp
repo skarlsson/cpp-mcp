@@ -109,24 +109,6 @@ public:
         };
         server_->set_capabilities(server_capabilities);
         
-        // Register initialize method handler
-        server_->register_method("initialize", [server_capabilities](const json& params) -> json {
-            // Verify initialize request parameters
-            EXPECT_EQ(params["protocolVersion"], MCP_VERSION);
-            EXPECT_TRUE(params.contains("capabilities"));
-            EXPECT_TRUE(params.contains("clientInfo"));
-            
-            // Return initialize response
-            return {
-                {"protocolVersion", MCP_VERSION},
-                {"capabilities", server_capabilities},
-                {"serverInfo", {
-                    {"name", "TestServer"},
-                    {"version", "1.0.0"}
-                }}
-            };
-        });
-        
         // Start server (non-blocking mode)
         server_->start(false);
         
@@ -545,7 +527,7 @@ public:
         };
         
         // Register tool
-        server_->register_tool(test_tool, [](const json& params) -> json {
+        server_->register_tool(test_tool, [](const json& params, const std::string& /* session_id */) -> json {
             // Simple tool implementation
             std::string location = params["location"];
             return {
@@ -560,7 +542,7 @@ public:
         });
         
         // Register tools list method
-        server_->register_method("tools/list", [](const json& params) -> json {
+        server_->register_method("tools/list", [](const json& params, const std::string& /* session_id */) -> json {
             return {
                 {"tools", json::array({
                     {
@@ -583,7 +565,7 @@ public:
         });
         
         // Register tools call method
-        server_->register_method("tools/call", [](const json& params) -> json {
+        server_->register_method("tools/call", [](const json& params, const std::string& /* session_id */) -> json {
             // Verify parameters
             EXPECT_EQ(params["name"], "get_weather");
             EXPECT_EQ(params["arguments"]["location"], "New York");

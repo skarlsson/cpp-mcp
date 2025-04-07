@@ -19,9 +19,6 @@
 
 namespace mcp {
 
-// Tool handler function type
-using tool_handler = std::function<json(const json&)>;
-
 // MCP Tool definition
 struct tool {
     std::string name;

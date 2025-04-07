@@ -134,15 +134,9 @@ void server::stop() {
         session_initialized_.clear();
     }
     
-    // Close all dispatchers outside the lock
-    for (auto& dispatcher : dispatchers_to_close) {
-        if (dispatcher && !dispatcher->is_closed()) {
-            try {
-                dispatcher->close();
-            } catch (...) {
-                // Ignore exceptions
-            }
-        }
+    // Close all sessions
+    for (const auto& [session_id, _] : session_dispatchers_) {
+        close_session(session_id);
     }
     
     // Give threads some time to handle close events
@@ -239,12 +233,12 @@ void server::set_capabilities(const json& capabilities) {
     capabilities_ = capabilities;
 }
 
-void server::register_method(const std::string& method, std::function<json(const json&)> handler) {
+void server::register_method(const std::string& method, method_handler handler) {
     std::lock_guard<std::mutex> lock(mutex_);
     method_handlers_[method] = handler;
 }
 
-void server::register_notification(const std::string& method, std::function<void(const json&)> handler) {
+void server::register_notification(const std::string& method, notification_handler handler) {
     std::lock_guard<std::mutex> lock(mutex_);
     notification_handlers_[method] = handler;
 }
@@ -255,7 +249,7 @@ void server::register_resource(const std::string& path, std::shared_ptr<resource
     
     // Register methods for resource access
     if (method_handlers_.find("resources/read") == method_handlers_.end()) {
-        method_handlers_["resources/read"] = [this](const json& params) -> json {
+        method_handlers_["resources/read"] = [this](const json& params, const std::string& session_id) -> json {
             if (!params.contains("uri")) {
                 throw mcp_exception(error_code::invalid_params, "Missing 'uri' parameter");
             }
@@ -276,7 +270,7 @@ void server::register_resource(const std::string& path, std::shared_ptr<resource
     }
     
     if (method_handlers_.find("resources/list") == method_handlers_.end()) {
-        method_handlers_["resources/list"] = [this](const json& params) -> json {
+        method_handlers_["resources/list"] = [this](const json& params, const std::string& session_id) -> json {
             json resources = json::array();
         
             for (const auto& [uri, res] : resources_) {
@@ -296,7 +290,7 @@ void server::register_resource(const std::string& path, std::shared_ptr<resource
     }
     
     if (method_handlers_.find("resources/subscribe") == method_handlers_.end()) {
-        method_handlers_["resources/subscribe"] = [this](const json& params) -> json {
+        method_handlers_["resources/subscribe"] = [this](const json& params, const std::string& session_id) -> json {
             if (!params.contains("uri")) {
                 throw mcp_exception(error_code::invalid_params, "Missing 'uri' parameter");
             }
@@ -312,7 +306,7 @@ void server::register_resource(const std::string& path, std::shared_ptr<resource
     }
     
     if (method_handlers_.find("resources/templates/list") == method_handlers_.end()) {
-        method_handlers_["resources/templates/list"] = [this](const json& params) -> json {
+        method_handlers_["resources/templates/list"] = [this](const json& params, const std::string& session_id) -> json {
             return json::array();
         };
     }
@@ -324,7 +318,7 @@ void server::register_tool(const tool& tool, tool_handler handler) {
     
     // Register methods for tool listing and calling
     if (method_handlers_.find("tools/list") == method_handlers_.end()) {
-        method_handlers_["tools/list"] = [this](const json& params) -> json {
+        method_handlers_["tools/list"] = [this](const json& params, const std::string& session_id) -> json {
             json tools_json = json::array();
             for (const auto& [name, tool_pair] : tools_) {
                 tools_json.push_back(tool_pair.first.to_json());
@@ -334,7 +328,7 @@ void server::register_tool(const tool& tool, tool_handler handler) {
     }
     
     if (method_handlers_.find("tools/call") == method_handlers_.end()) {
-        method_handlers_["tools/call"] = [this](const json& params) -> json {
+        method_handlers_["tools/call"] = [this](const json& params, const std::string& session_id) -> json {
             if (!params.contains("name")) {
                 throw mcp_exception(error_code::invalid_params, "Missing 'name' parameter");
             }
@@ -352,7 +346,7 @@ void server::register_tool(const tool& tool, tool_handler handler) {
             };
 
             try {
-                tool_result["content"] = it->second.second(tool_args);
+                tool_result["content"] = it->second.second(tool_args, session_id);
             } catch (...) {
                 tool_result["isError"] = true;
             }
@@ -360,6 +354,11 @@ void server::register_tool(const tool& tool, tool_handler handler) {
             return tool_result;
         };
     }
+}
+
+void server::register_session_cleanup(const std::string& key, session_cleanup_handler handler) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_cleanup_handler_[key] = handler;
 }
 
 std::vector<tool> server::get_tools() const {
@@ -373,7 +372,7 @@ std::vector<tool> server::get_tools() const {
     return tools;
 }
 
-void server::set_auth_handler(std::function<bool(const std::string&)> handler) {
+void server::set_auth_handler(auth_handler handler) {
     std::lock_guard<std::mutex> lock(mutex_);
     auth_handler_ = handler;
 }
@@ -442,47 +441,7 @@ void server::handle_sse(const httplib::Request& req, httplib::Response& res) {
             LOG_ERROR("SSE session thread exception: ", session_id, ", ", e.what());
         }
         
-        // Clean up resources safely
-        try {
-            // Copy resources to be processed
-            std::shared_ptr<event_dispatcher> dispatcher_to_close;
-            std::unique_ptr<std::thread> thread_to_release;
-            
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                
-                // Get dispatcher pointer
-                auto dispatcher_it = session_dispatchers_.find(session_id);
-                if (dispatcher_it != session_dispatchers_.end()) {
-                    dispatcher_to_close = dispatcher_it->second;
-                    session_dispatchers_.erase(dispatcher_it);
-                }
-                
-                // Get thread pointer
-                auto thread_it = sse_threads_.find(session_id);
-                if (thread_it != sse_threads_.end()) {
-                    thread_to_release = std::move(thread_it->second);
-                    sse_threads_.erase(thread_it);
-                }
-                
-                // Clean up initialization status
-                session_initialized_.erase(session_id);
-            }
-            
-            // Close dispatcher outside the lock
-            if (dispatcher_to_close && !dispatcher_to_close->is_closed()) {
-                dispatcher_to_close->close();
-            }
-            
-            // Release thread resources
-            if (thread_to_release) {
-                thread_to_release.release();
-            }
-        } catch (const std::exception& e) {
-            LOG_WARNING("Exception while cleaning up session resources: ", session_id, ", ", e.what());
-        } catch (...) {
-            LOG_WARNING("Unknown exception while cleaning up session resources: ", session_id);
-        }
+        close_session(session_id);
     });
     
     // Store thread
@@ -507,8 +466,7 @@ void server::handle_sse(const httplib::Request& req, httplib::Response& res) {
             if (!result) {
                 LOG_WARNING("Failed to wait for event, closing connection: ", session_id);
                 
-                // Close dispatcher directly, no need to lock
-                session_dispatcher->close();
+                close_session(session_id);
                 
                 return false;
             }
@@ -520,8 +478,7 @@ void server::handle_sse(const httplib::Request& req, httplib::Response& res) {
         } catch (const std::exception& e) {
             LOG_ERROR("SSE content provider exception: ", e.what());
             
-            // Close dispatcher directly, no need to lock
-            session_dispatcher->close();
+            close_session(session_id);
             
             return false;
         }
@@ -673,7 +630,7 @@ json server::process_request(const request& req, const std::string& session_id) 
         }
         
         // Find registered method handler
-        std::function<json(const json&)> handler;
+        method_handler handler;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = method_handlers_.find(req.method);
@@ -685,8 +642,8 @@ json server::process_request(const request& req, const std::string& session_id) 
         if (handler) {
             // Call handler
             LOG_INFO("Calling method handler: ", req.method);
-            auto future = thread_pool_.enqueue([handler, params = req.params]() -> json {
-                return handler(params);
+            auto future = thread_pool_.enqueue([handler, params = req.params, session_id]() -> json {
+                return handler(params, session_id);
             });
             json result = future.get();
             
@@ -791,25 +748,13 @@ json server::handle_initialize(const request& req, const std::string& session_id
     return response::create_success(req.id, result).to_json();
 }
 
-void server::send_request(const std::string& session_id, const std::string& method, const json& params) {
+void server::send_jsonrpc(const std::string& session_id, const json& message) {
     // Check if session ID is valid
     if (session_id.empty()) {
-        LOG_WARNING("Cannot send request to empty session_id");
+        LOG_WARNING("Cannot send message to empty session_id");
         return;
     }
-    
-    // Check if the method is ping or logging
-    bool is_allowed_before_init = (method == "ping" || method == "logging");
-    
-    // Check if client is initialized or if this is an allowed method
-    if (!is_allowed_before_init && !is_session_initialized(session_id)) {
-        LOG_WARNING("Cannot send ", method, " request to session ", session_id, " before it is initialized");
-        return;
-    }
-    
-    // Create request
-    request req = request::create(method, params);
-    
+
     // Get session dispatcher
     std::shared_ptr<event_dispatcher> dispatcher;
     {
@@ -828,14 +773,18 @@ void server::send_request(const std::string& session_id, const std::string& meth
         return;
     }
     
-    // Send request
+    // Send message
     std::stringstream ss;
-    ss << "event: message\r\ndata: " << req.to_json().dump() << "\r\n\r\n";
+    ss << "event: message\r\ndata: " << message.dump() << "\r\n\r\n";
     bool result = dispatcher->send_event(ss.str());
     
     if (!result) {
-        LOG_ERROR("Failed to send request to session: ", session_id);
+        LOG_ERROR("Failed to send message to session: ", session_id);
     }
+}
+
+void server::send_request(const std::string& session_id, const request& req) {
+    send_jsonrpc(session_id, req.to_json());
 }
 
 bool server::is_session_initialized(const std::string& session_id) const {
@@ -933,18 +882,59 @@ void server::check_inactive_sessions() {
     for (const auto& session_id : sessions_to_close) {
         LOG_INFO("Closing inactive session: ", session_id);
         
+        close_session(session_id);
+    }
+}
+
+bool server::set_mount_point(const std::string& mount_point, const std::string& dir, httplib::Headers headers) {
+    return http_server_->set_mount_point(mount_point, dir, headers);
+}
+
+void server::close_session(const std::string& session_id) {
+     // Clean up resources safely
+    try {
+        for (const auto& [key, handler] : session_cleanup_handler_) {
+            handler(key);
+        }
+
+        // Copy resources to be processed
         std::shared_ptr<event_dispatcher> dispatcher_to_close;
+        std::unique_ptr<std::thread> thread_to_release;
+        
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto disp_it = session_dispatchers_.find(session_id);
-            if (disp_it != session_dispatchers_.end()) {
-                dispatcher_to_close = disp_it->second;
+            
+            // Get dispatcher pointer
+            auto dispatcher_it = session_dispatchers_.find(session_id);
+            if (dispatcher_it != session_dispatchers_.end()) {
+                dispatcher_to_close = dispatcher_it->second;
+                session_dispatchers_.erase(dispatcher_it);
             }
+            
+            // Get thread pointer
+            auto thread_it = sse_threads_.find(session_id);
+            if (thread_it != sse_threads_.end()) {
+                thread_to_release = std::move(thread_it->second);
+                sse_threads_.erase(thread_it);
+            }
+            
+            // Clean up initialization status
+            session_initialized_.erase(session_id);
         }
         
-        if (dispatcher_to_close) {
+        // Close dispatcher outside the lock
+        if (dispatcher_to_close && !dispatcher_to_close->is_closed()) {
             dispatcher_to_close->close();
         }
+        
+        // Release thread resources
+        if (thread_to_release) {
+            thread_to_release.release();
+        }
+    } catch (const std::exception& e) {
+        LOG_WARNING("Exception while cleaning up session resources: ", session_id, ", ", e.what());
+    } catch (...) {
+        LOG_WARNING("Unknown exception while cleaning up session resources: ", session_id);
     }
 }
 

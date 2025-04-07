@@ -18,7 +18,7 @@
 #include <algorithm>
 
 // Tool handler for getting current time
-mcp::json get_time_handler(const mcp::json& params) {
+mcp::json get_time_handler(const mcp::json& params, const std::string& /* session_id */) {
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     
@@ -37,7 +37,7 @@ mcp::json get_time_handler(const mcp::json& params) {
 }
 
 // Echo tool handler
-mcp::json echo_handler(const mcp::json& params) {
+mcp::json echo_handler(const mcp::json& params, const std::string& /* session_id */) {
     mcp::json result = params;
     
     if (params.contains("text")) {
@@ -63,7 +63,7 @@ mcp::json echo_handler(const mcp::json& params) {
 }
 
 // Calculator tool handler
-mcp::json calculator_handler(const mcp::json& params) {
+mcp::json calculator_handler(const mcp::json& params, const std::string& /* session_id */) {
     if (!params.contains("operation")) {
         throw mcp::mcp_exception(mcp::error_code::invalid_params, "Missing 'operation' parameter");
     }
@@ -107,7 +107,7 @@ mcp::json calculator_handler(const mcp::json& params) {
 }
 
 // Custom API endpoint handler
-mcp::json hello_handler(const mcp::json& params) {
+mcp::json hello_handler(const mcp::json& params, const std::string& /* session_id */) {
     std::string name = params.contains("name") ? params["name"].get<std::string>() : "World";
     return {
         {

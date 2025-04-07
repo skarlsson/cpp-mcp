@@ -88,7 +88,7 @@ mcp::server server("localhost", 8080);
 server.set_server_info("MCP Example Server", "2024-11-05");
 
 // Register tools
-mcp::json hello_handler(const mcp::json& params) {
+mcp::json hello_handler(const mcp::json& params, const std::string /* session_id */) {
     std::string name = params.contains("name") ? params["name"].get<std::string>() : "World";
     return {
         {
