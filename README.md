@@ -90,6 +90,11 @@ server.set_server_info("MCP Example Server", "2024-11-05");
 // Register tools
 mcp::json hello_handler(const mcp::json& params, const std::string /* session_id */) {
     std::string name = params.contains("name") ? params["name"].get<std::string>() : "World";
+
+    // Server will catch exceptions and return error contents
+    // For example, you can use `throw mcp::mcp_exception(mcp::error_code::invalid_params, "Invalid name");` to report an error
+
+    // Content should be a JSON array, see: https://modelcontextprotocol.io/specification/2024-11-05/server/tools#tool-result
     return {
         {
             {"type", "text"},
