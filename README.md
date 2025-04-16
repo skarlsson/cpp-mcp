@@ -84,8 +84,8 @@ Demonstrates how to use the stdio client to communicate with a local server:
 
 ```cpp
 // Create and configure the server
-mcp::server server("localhost", 8080);
-server.set_server_info("MCP Example Server", "2024-11-05");
+mcp::server server("localhost", 8080); // Host and port
+server.set_server_info("MCP Example Server", "0.1.0"); // Name and version
 
 // Register tools
 mcp::json hello_handler(const mcp::json& params, const std::string /* session_id */) {
