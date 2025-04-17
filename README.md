@@ -20,7 +20,7 @@ cmake --build build --config Release
 
 Build with tests:
 ```
-git submodule --init --recursive # Get GoogleTest
+git submodule update --init --recursive # Get GoogleTest
 
 cmake -B build -DMCP_BUILD_TESTS=ON
 cmake --build build --config Release
