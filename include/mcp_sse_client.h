@@ -170,12 +170,6 @@ public:
     json list_resource_templates() override;
 
     /**
-     * @brief Check if the server is accessible
-     * @return True if the server is accessible
-     */
-    bool check_server_accessible();
-
-    /**
      * @brief Check if the client is running
      * @return True if the client is running
      */
