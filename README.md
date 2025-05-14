@@ -26,6 +26,14 @@ cmake -B build -DMCP_BUILD_TESTS=ON
 cmake --build build --config Release
 ```
 
+Build with SSL support:
+```
+git submodule update --init --recursive # Get GoogleTest
+
+cmake -B build -DMCP_SSL=ON
+cmake --build build --config Release
+```
+
 ## Adopters
 
 Here are some open-source projects that are using this repository.  
@@ -70,7 +78,7 @@ Implements MCP server functionality.
 Example MCP server implementation with custom tools:
 - Time tool: Get the current time
 - Calculator tool: Perform mathematical operations
-- Echo tool: Process and analyze text
+- Echo tool: Echo input with optional transformations (to uppercase, reverse)
 - Greeting tool: Returns `Hello, `+ input name + `!`, defaults to `Hello, World!`
 
 ### HTTP Client Example (`examples/client_example.cpp`)
@@ -87,6 +95,24 @@ Demonstrates how to use the stdio client to communicate with a local server:
 - Launch a local server process
 - Access filesystem resources
 - Call server tools
+
+### Agent Example (`examples/agent_example.cpp`)
+
+| Option | Description |
+| :- | :- |
+| `--base-url` | LLM base URL (e.g. `https://openrouter.ai`) |
+| `--endpoint` | LLM endpoint (default to `/v1/chat/completions/`) |
+| `--api-key` | LLM API key |
+| `--model` | Model name (e.g. `gpt-3.5-turbo`) |
+| `--system-prompt` | System prompt |
+| `--max-tokens` | Maximum number of tokens to generate (default to 2048) |
+| `--temperature` | Temperature (default to 0.0) |
+| `--max-steps` | Maximum steps calling tools without user input (default to 3) |
+
+Example usage:
+```
+./build/examples/agent_example --base-url <base_url> --endpoint <endpoint> --api-key <api_key> --model <model_name>
+```
 
 ## How to Use
 
