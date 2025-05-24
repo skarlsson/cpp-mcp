@@ -114,6 +114,8 @@ Example usage:
 ./build/examples/agent_example --base-url <base_url> --endpoint <endpoint> --api-key <api_key> --model <model_name>
 ```
 
+**Note**: Remember to compile with `-DMCP_SSL=ON` when connecting to an https base URL.
+
 ## How to Use
 
 ### Setting up an HTTP Server
