@@ -46,7 +46,6 @@ void sse_client::init_client(const std::string& base_url) {
     http_client_->set_write_timeout(timeout_seconds_, 0);
     
     sse_client_->set_connection_timeout(timeout_seconds_ * 2, 0);
-    sse_client_->set_read_timeout(0, 0);
     sse_client_->set_write_timeout(timeout_seconds_, 0);
 }
 
