@@ -341,9 +341,13 @@ private:
     
     // Map to track session initialization status (session_id -> initialized)
     std::map<std::string, bool> session_initialized_;
+    
+    // Map to track OAuth tokens (token -> session_id)
+    std::map<std::string, std::string> oauth_tokens_;
 
     // Handle SSE requests
     void handle_sse(const httplib::Request& req, httplib::Response& res);
+    void handle_sse_post(const httplib::Request& req, httplib::Response& res);
     
     // Handle incoming JSON-RPC requests
     void handle_jsonrpc(const httplib::Request& req, httplib::Response& res);

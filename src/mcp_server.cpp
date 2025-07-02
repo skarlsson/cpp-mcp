@@ -30,7 +30,9 @@ bool server::start(bool blocking) {
     http_server_->Options(".*", [](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Mcp-Session-Id");
+        res.set_header("Access-Control-Allow-Credentials", "true");
+        res.set_header("Access-Control-Max-Age", "3600");
         res.status = 204; // No Content
     });
     
@@ -40,10 +42,110 @@ bool server::start(bool blocking) {
         LOG_INFO(req.remote_addr, ":", req.remote_port, " - \"POST ", req.path, " HTTP/1.1\" ", res.status);
     });
 
-    // Setup SSE endpoint
+    // Setup SSE endpoint for new Streamable HTTP transport
+    // Support both GET (for compatibility) and POST (for new spec)
     http_server_->Get(sse_endpoint_.c_str(), [this](const httplib::Request& req, httplib::Response& res) {
         this->handle_sse(req, res);
         LOG_INFO(req.remote_addr, ":", req.remote_port, " - \"GET ", req.path, " HTTP/1.1\" ", res.status);
+    });
+    
+    http_server_->Post(sse_endpoint_.c_str(), [this](const httplib::Request& req, httplib::Response& res) {
+        this->handle_sse_post(req, res);
+        LOG_INFO(req.remote_addr, ":", req.remote_port, " - \"POST ", req.path, " HTTP/1.1\" ", res.status);
+    });
+    
+    // Root endpoint for HTTP transport mode
+    http_server_->Post("/", [this](const httplib::Request& req, httplib::Response& res) {
+        this->handle_sse_post(req, res);
+        LOG_INFO(req.remote_addr, ":", req.remote_port, " - \"POST ", req.path, " HTTP/1.1\" ", res.status);
+    });
+    
+    // OAuth2 dynamic client registration endpoint
+    http_server_->Post("/register", [this](const httplib::Request& req, httplib::Response& res) {
+        LOG_INFO("OAuth register request from ", req.remote_addr);
+        // Return a mock client registration response
+        json response = {
+            {"client_id", "mcp-client-" + generate_session_id()},
+            {"client_secret", "not-required-for-local"},
+            {"registration_access_token", "not-required"},
+            {"registration_client_uri", "http://localhost:" + std::to_string(port_) + "/register"},
+            {"grant_types", {"implicit", "authorization_code"}},
+            {"response_types", {"code", "token"}},
+            {"redirect_uris", json::array({"http://localhost/callback"})},
+            {"token_endpoint_auth_method", "none"}
+        };
+        res.set_header("Content-Type", "application/json");
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_content(response.dump(), "application/json");
+        LOG_INFO(req.remote_addr, ":", req.remote_port, " - \"POST ", req.path, " HTTP/1.1\" ", res.status);
+    });
+    
+    // OAuth2 authorization endpoint
+    http_server_->Get("/authorize", [this](const httplib::Request& req, httplib::Response& res) {
+        LOG_INFO("OAuth authorize request from ", req.remote_addr);
+        
+        // Extract parameters
+        auto redirect_uri = req.get_param_value("redirect_uri");
+        auto state = req.get_param_value("state");
+        auto client_id = req.get_param_value("client_id");
+        
+        // Validate redirect_uri
+        if (redirect_uri.empty()) {
+            LOG_ERROR("Missing redirect_uri parameter");
+            res.status = 400;
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_header("Content-Type", "application/json");
+            res.set_content("{\"error\":\"invalid_request\",\"error_description\":\"Missing redirect_uri parameter\"}", "application/json");
+            return;
+        }
+        
+        // For local MCP server, auto-approve and redirect with code
+        std::string auth_code = "auth-" + generate_session_id();
+        
+        // Build redirect URL with code and state
+        std::string redirect_url = redirect_uri + "?code=" + auth_code;
+        if (!state.empty()) {
+            redirect_url += "&state=" + state;
+        }
+        
+        // Redirect to callback
+        res.set_redirect(redirect_url);
+        LOG_INFO("Redirecting to: ", redirect_url);
+        LOG_INFO(req.remote_addr, ":", req.remote_port, " - \"GET ", req.path, " HTTP/1.1\" ", res.status);
+    });
+    
+    // OAuth2 token endpoint
+    http_server_->Post("/token", [this](const httplib::Request& req, httplib::Response& res) {
+        LOG_INFO("OAuth token request from ", req.remote_addr);
+        
+        // Generate token and session
+        std::string token = "mock-token-" + generate_session_id();
+        std::string session_id = generate_session_id();
+        
+        // Store token-to-session mapping
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            oauth_tokens_[token] = session_id;
+            // Create session dispatcher
+            auto dispatcher = std::make_shared<event_dispatcher>();
+            session_dispatchers_[session_id] = dispatcher;
+            // Mark session as initialized
+            session_initialized_[session_id] = true;
+            LOG_INFO("Created OAuth token for session: ", session_id);
+        }
+        
+        // Return token response
+        json response = {
+            {"access_token", token},
+            {"token_type", "Bearer"},
+            {"expires_in", 3600},
+            {"scope", "mcp:*"}
+        };
+        
+        res.set_header("Content-Type", "application/json");
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_content(response.dump(), "application/json");
+        LOG_INFO(req.remote_addr, ":", req.remote_port, " - \"POST ", req.path, " HTTP/1.1\" ", res.status);
     });
     
     // Start resource check thread (only start in non-blocking mode)
@@ -132,6 +234,7 @@ void server::stop() {
         session_dispatchers_.clear();
         sse_threads_.clear();
         session_initialized_.clear();
+        oauth_tokens_.clear();
     }
     
     // Close all sessions
@@ -354,7 +457,14 @@ void server::register_tool(const tool& tool, tool_handler handler) {
             };
 
             try {
-                tool_result["content"] = it->second.second(tool_args, session_id);
+                auto result = it->second.second(tool_args, session_id);
+                // MCP spec requires content to be an array of content items
+                tool_result["content"] = json::array({
+                    {
+                        {"type", "text"},
+                        {"text", result.dump()}
+                    }
+                });
             } catch (const std::exception& e) {
                 tool_result["isError"] = true;
                 tool_result["content"] = json::array({
@@ -497,6 +607,163 @@ void server::handle_sse(const httplib::Request& req, httplib::Response& res) {
             return false;
         }
     });
+}
+
+void server::handle_sse_post(const httplib::Request& req, httplib::Response& res) {
+    // Streamable HTTP transport handler (2025-03-26 spec)
+    // This handles POST requests that can return either JSON or SSE
+    
+    // Validate Origin header for security (required by MCP spec)
+    auto origin_header = req.get_header_value("Origin");
+    if (!origin_header.empty()) {
+        // Allow localhost origins, file:// protocol, and Claude's domains
+        bool valid_origin = false;
+        if (origin_header == "http://localhost" || 
+            origin_header.find("http://localhost:") == 0 ||
+            origin_header == "http://127.0.0.1" ||
+            origin_header.find("http://127.0.0.1:") == 0 ||
+            origin_header == "file://" ||
+            origin_header == "https://claude.ai" ||
+            origin_header.find("https://claude.ai") == 0 ||
+            origin_header.find("https://*.claude.ai") != std::string::npos ||
+            origin_header.find("https://anthropic.com") != std::string::npos) {
+            valid_origin = true;
+        }
+        
+        if (!valid_origin) {
+            LOG_WARNING("Rejected request from invalid origin: ", origin_header);
+            res.status = 403;
+            res.set_content("{\"error\":\"Invalid origin\"}", "application/json");
+            return;
+        }
+    }
+    
+    // Check authentication if handler is set
+    if (auth_handler_) {
+        auto auth_header = req.get_header_value("Authorization");
+        std::string username, password;
+        // Basic auth parsing could be added here if needed
+        if (!auth_handler_(username, password)) {
+            res.status = 401;
+            res.set_header("WWW-Authenticate", "Basic realm=\"MCP Server\"");
+            res.set_content("{\"error\":\"Authentication required\"}", "application/json");
+            return;
+        }
+    }
+    
+    // Check Accept header to determine response type
+    bool wants_sse = false;
+    auto accept_header = req.get_header_value("Accept");
+    if (accept_header.find("text/event-stream") != std::string::npos) {
+        wants_sse = true;
+    }
+    
+    // Parse the JSON-RPC request
+    json req_json;
+    try {
+        req_json = json::parse(req.body);
+    } catch (const json::exception& e) {
+        LOG_ERROR("Failed to parse JSON request: ", e.what());
+        res.status = 400;
+        res.set_content("{\"error\":\"Invalid JSON\"}", "application/json");
+        return;
+    }
+    
+    // Check for Bearer token authentication
+    std::string session_id;
+    auto auth_header = req.get_header_value("Authorization");
+    if (!auth_header.empty() && auth_header.find("Bearer ") == 0) {
+        std::string token = auth_header.substr(7); // Remove "Bearer " prefix
+        
+        // Look up session ID from token
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto token_it = oauth_tokens_.find(token);
+        if (token_it != oauth_tokens_.end()) {
+            session_id = token_it->second;
+            LOG_INFO("Authenticated request with Bearer token for session: ", session_id);
+            
+            // Ensure session exists and is initialized
+            if (session_dispatchers_.find(session_id) == session_dispatchers_.end()) {
+                auto dispatcher = std::make_shared<event_dispatcher>();
+                session_dispatchers_[session_id] = dispatcher;
+            }
+            // Mark session as initialized for OAuth authenticated requests
+            session_initialized_[session_id] = true;
+        } else {
+            LOG_WARNING("Invalid Bearer token");
+            res.status = 401;
+            res.set_header("WWW-Authenticate", "Bearer");
+            res.set_content("{\"error\":\"Invalid or expired token\"}", "application/json");
+            return;
+        }
+    } else {
+        // No Bearer token, check session header or create new session
+        auto session_header = req.get_header_value("Mcp-Session-Id");
+        if (!session_header.empty()) {
+            session_id = session_header;
+            // Check if this session exists, create minimal session state if not
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (session_dispatchers_.find(session_id) == session_dispatchers_.end()) {
+                // Create a minimal session dispatcher for tracking
+                auto dispatcher = std::make_shared<event_dispatcher>();
+                session_dispatchers_[session_id] = dispatcher;
+            }
+        } else {
+            session_id = generate_session_id();
+            // Create session dispatcher for new session
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto dispatcher = std::make_shared<event_dispatcher>();
+            session_dispatchers_[session_id] = dispatcher;
+        }
+    }
+    
+    // Create request object
+    request mcp_req;
+    try {
+        mcp_req.jsonrpc = req_json["jsonrpc"].get<std::string>();
+        if (req_json.contains("id") && !req_json["id"].is_null()) {
+            mcp_req.id = req_json["id"];
+        }
+        mcp_req.method = req_json["method"].get<std::string>();
+        if (req_json.contains("params")) {
+            mcp_req.params = req_json["params"];
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to create request object: ", e.what());
+        res.status = 400;
+        res.set_content("{\"error\":\"Invalid request format\"}", "application/json");
+        return;
+    }
+    
+    // Process the request
+    json response = process_request(mcp_req, session_id);
+    
+    // For initialize requests, add session ID header
+    if (mcp_req.method == "initialize" && response.contains("result")) {
+        res.set_header("Mcp-Session-Id", session_id);
+    }
+    
+    // Set CORS headers for all responses
+    res.set_header("Access-Control-Allow-Origin", "*");
+    res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    res.set_header("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, Mcp-Session-Id");
+    
+    // Send response based on Accept header
+    if (wants_sse) {
+        // SSE response
+        res.set_header("Content-Type", "text/event-stream");
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Connection", "keep-alive");
+        
+        // Send as SSE event
+        std::stringstream ss;
+        ss << "data: " << response.dump() << "\r\n\r\n";
+        res.set_content(ss.str(), "text/event-stream");
+    } else {
+        // Plain JSON response
+        res.set_header("Content-Type", "application/json");
+        res.set_content(response.dump(), "application/json");
+    }
 }
 
 void server::handle_jsonrpc(const httplib::Request& req, httplib::Response& res) {
@@ -716,14 +983,14 @@ json server::handle_initialize(const request& req, const std::string& session_id
     std::string requested_version = params["protocolVersion"].get<std::string>();
     LOG_INFO("Client requested protocol version: ", requested_version);
 
-    if (requested_version != MCP_VERSION) {
-        LOG_ERROR("Unsupported protocol version: ", requested_version, ", server supports: ", MCP_VERSION);
+    if (requested_version != MCP_VERSION && requested_version != MCP_VERSION_ALT && requested_version != MCP_VERSION_NEW) {
+        LOG_ERROR("Unsupported protocol version: ", requested_version, ", server supports: ", MCP_VERSION, ", ", MCP_VERSION_ALT, " and ", MCP_VERSION_NEW);
         return response::create_error(
             req.id, 
             error_code::invalid_params, 
             "Unsupported protocol version",
             {
-                {"supported", {MCP_VERSION}},
+                {"supported", {MCP_VERSION, MCP_VERSION_ALT, MCP_VERSION_NEW}},
                 {"requested", params["protocolVersion"]}
             }
         ).to_json();
@@ -752,7 +1019,7 @@ json server::handle_initialize(const request& req, const std::string& session_id
     };
 
     json result = {
-        {"protocolVersion", MCP_VERSION},
+        {"protocolVersion", requested_version},  // Echo back the client's requested version
         {"capabilities", capabilities_},
         {"serverInfo", server_info}
     };
@@ -934,6 +1201,16 @@ void server::close_session(const std::string& session_id) {
             
             // Clean up initialization status
             session_initialized_.erase(session_id);
+            
+            // Clean up OAuth tokens associated with this session
+            for (auto it = oauth_tokens_.begin(); it != oauth_tokens_.end(); ) {
+                if (it->second == session_id) {
+                    LOG_INFO("Removing OAuth token for closed session: ", session_id);
+                    it = oauth_tokens_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
         }
         
         // Close dispatcher outside the lock

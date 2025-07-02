@@ -26,6 +26,8 @@ using json = nlohmann::ordered_json;
 
 // MCP version
 constexpr const char* MCP_VERSION = "2024-11-05";
+constexpr const char* MCP_VERSION_ALT = "0.1.0";  // Alternative version for Claude Desktop compatibility
+constexpr const char* MCP_VERSION_NEW = "2025-06-18";  // Latest protocol version
 
 // MCP error codes (JSON-RPC 2.0 standard codes)
 enum class error_code {
